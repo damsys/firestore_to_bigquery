@@ -19,7 +19,7 @@ variable "rules" {
   default = {
     "Testdata" = {
       table  = "f2bdemo.testdata"
-      fields = ["Name", "Ruby", "Age", "CreatedAt"]
+      fields = ["ID", "Name", "Ruby", "Age", "CreatedAt"]
     }
   }
 }

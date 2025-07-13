@@ -35,3 +35,9 @@ resource "google_project_service" "firestore" {
 
   disable_on_destroy = false
 }
+
+resource "google_project_service" "pubsub" {
+  service = "pubsub.googleapis.com"
+
+  disable_on_destroy = false
+}

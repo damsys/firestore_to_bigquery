@@ -26,3 +26,17 @@ resource "google_project_iam_member" "firestore_to_bigquery_event_receiver" {
   role    = "roles/eventarc.eventReceiver"
   member  = "serviceAccount:${google_service_account.database_to_bigquery.email}"
 }
+
+resource "google_service_account_iam_member" "pubsub_firestore_to_bigquery" {
+  service_account_id = google_service_account.database_to_bigquery.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${local.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.pubsub]
+}
+
+resource "google_pubsub_topic_iam_member" "firestore_to_bigquery_pubsub_publisher" {
+  topic  = google_pubsub_topic.testdata.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:${google_service_account.database_to_bigquery.email}"
+}

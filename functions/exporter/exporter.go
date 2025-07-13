@@ -2,11 +2,13 @@ package exporter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/bigquery/storage/managedwriter"
+	"cloud.google.com/go/pubsub"
 	"github.com/cloudevents/sdk-go/v2/event"
 	"github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
 	"google.golang.org/protobuf/proto"
@@ -16,6 +18,7 @@ type Exporter struct {
 	config              *ExportConfig
 	bigqueryClient      *bigquery.Client
 	managedWriterClient *managedwriter.Client
+	pubsubClient        *pubsub.Client
 }
 
 type ExportConfig struct {
@@ -25,6 +28,7 @@ type ExportConfig struct {
 type ExportRule struct {
 	Table  string   `json:"table"`
 	Fields []string `json:"fields"`
+	Topic  string   `json:"topic"`
 	cache  *exportCache
 }
 
@@ -41,11 +45,16 @@ func New(ctx context.Context, config *ExportConfig) (*Exporter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create managed writer client: %w", err)
 	}
+	pubsubClient, err := pubsub.NewClient(ctx, getProjectID(pubsub.DetectProjectID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pubsub client: %w", err)
+	}
 
 	return &Exporter{
 		config:              config,
 		bigqueryClient:      bigqueryClient,
 		managedWriterClient: managedWriterClient,
+		pubsubClient:        pubsubClient,
 	}, nil
 }
 
@@ -88,15 +97,28 @@ func (e *Exporter) ExportHandler(ctx context.Context, event event.Event) error {
 	return nil
 }
 
+func hasIntersect(a, b []string) bool {
+	for _, v := range a {
+		for _, v2 := range b {
+			if v == v2 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.DocumentEventData) error {
 	eventType := DetectEventType(data)
-	slog.InfoContext(ctx, "event info", slog.String("event_type", string(eventType)))
+
+	var documentID string
 	if eventType == EventTypeDelete {
-		slog.WarnContext(ctx, "delete event is not supported yet")
-		return nil
+		documentID = data.GetOldValue().GetName()
+	} else {
+		documentID = data.GetValue().GetName()
 	}
 
-	name, err := ParseDocumentName(data.GetValue().GetName())
+	name, err := ParseDocumentName(documentID)
 	if err != nil {
 		return err
 	}
@@ -112,35 +134,58 @@ func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.Doc
 		// Nothing to do
 		return nil
 	}
-
-	// BigQuery へ送信するデータを整形
-	id := data.GetValue().Fields["ID"].GetStringValue()
-	if id == "" {
-		slog.WarnContext(
-			ctx,
-			"ID is empty",
-			slog.String("documentName", data.GetValue().GetName()),
-		)
-	}
-	row := make(map[string]any, len(rule.Fields)+1)
-	row["ID"] = id
-
-	for _, field := range rule.Fields {
-		row[field] = ExtractDocumentFieldValue(data.GetValue().Fields[field])
-	}
-
-	// BigQuery へ挿入
-	if rule.cache == nil {
-		rule.cache, err = e.newExportCache(rule.Table)
-		if err != nil {
-			return fmt.Errorf("failed to create export cache: %w", err)
+	// 更新時には同期対象が更新されたフィールドのみを送信する
+	if data.GetUpdateMask() != nil {
+		if !hasIntersect(rule.Fields, data.GetUpdateMask().GetFieldPaths()) {
+			return nil
 		}
 	}
 
-	// if err := e.InsertRow(ctx, table, row); err != nil {
-	if err := e.UpsertRowWithStorageAPI(ctx, row, rule.cache); err != nil {
-		return fmt.Errorf("failed to upsert row: %w", err)
+	// 同期用ドキュメントの構築
+	row := make(map[string]any, len(rule.Fields))
+	for _, field := range rule.Fields {
+		value := data.GetValue().Fields[field]
+		if value == nil {
+			continue
+		}
+		row[field] = ExtractDocumentFieldValue(data.GetValue().Fields[field])
 	}
-	//}
+	// 更新条件の設定
+	if eventType == EventTypeDelete {
+		row["_CHANGE_TYPE"] = "DELETE"
+	} else {
+		row["_CHANGE_TYPE"] = "UPSERT"
+	}
+	body, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("failed to marshal row: %w", err)
+	}
+
+	// データの送信
+	topic := e.pubsubClient.Topic(rule.Topic)
+	_, err = topic.Publish(ctx, &pubsub.Message{
+		Data: body,
+	}).Get(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to publish message: %w", err)
+	}
+
+	/*
+
+		// BigQuery へ挿入
+		if rule.cache == nil {
+			rule.cache, err = e.newExportCache(rule.Table)
+			if err != nil {
+				return fmt.Errorf("failed to create export cache: %w", err)
+			}
+		}
+
+		// if err := e.InsertRow(ctx, table, row); err != nil {
+		if err := e.UpsertRowWithStorageAPI(ctx, row, rule.cache); err != nil {
+			return fmt.Errorf("failed to upsert row: %w", err)
+		}
+		//}
+	*/
+
 	return nil
 }

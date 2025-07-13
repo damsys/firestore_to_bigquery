@@ -4,6 +4,7 @@ go 1.23.4
 
 require (
 	cloud.google.com/go/bigquery v1.69.0
+	cloud.google.com/go/pubsub v1.49.0
 	github.com/GoogleCloudPlatform/functions-framework-go v1.9.2
 	github.com/cloudevents/sdk-go/v2 v2.16.1
 	github.com/googleapis/google-cloudevents-go v0.10.0

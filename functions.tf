@@ -20,7 +20,14 @@ resource "google_cloudfunctions2_function" "database_to_bigquery" {
 
     environment_variables = {
       EXPORT_CONFIG = jsonencode({
-        rules = var.rules
+        rules = {
+          for k, rule in var.rules : k => merge(
+            rule,
+            {
+              topic = google_pubsub_topic.testdata.name
+            },
+          )
+        }
       })
     }
   }
