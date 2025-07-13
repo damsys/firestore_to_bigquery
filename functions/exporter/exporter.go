@@ -111,14 +111,14 @@ func hasIntersect(a, b []string) bool {
 func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.DocumentEventData) error {
 	eventType := DetectEventType(data)
 
-	var documentID string
+	var document *firestoredata.Document
 	if eventType == EventTypeDelete {
-		documentID = data.GetOldValue().GetName()
+		document = data.GetOldValue()
 	} else {
-		documentID = data.GetValue().GetName()
+		document = data.GetValue()
 	}
 
-	name, err := ParseDocumentName(documentID)
+	name, err := ParseDocumentName(document.GetName())
 	if err != nil {
 		return err
 	}
@@ -142,13 +142,22 @@ func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.Doc
 	}
 
 	// 同期用ドキュメントの構築
-	row := make(map[string]any, len(rule.Fields))
-	for _, field := range rule.Fields {
-		value := data.GetValue().Fields[field]
-		if value == nil {
-			continue
+	var row map[string]any
+	if len(rule.Fields) > 0 {
+		row = make(map[string]any, len(rule.Fields)+1)
+		for _, field := range rule.Fields {
+			value := document.Fields[field]
+			if value == nil {
+				continue
+			}
+			row[field] = ExtractDocumentFieldValue(value)
 		}
-		row[field] = ExtractDocumentFieldValue(data.GetValue().Fields[field])
+	} else {
+		// 全フィールドを対象にする
+		row = make(map[string]any, len(document.Fields))
+		for field, value := range document.Fields {
+			row[field] = ExtractDocumentFieldValue(value)
+		}
 	}
 	// 更新条件の設定
 	if eventType == EventTypeDelete {
