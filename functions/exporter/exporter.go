@@ -23,9 +23,9 @@ type ExportConfig struct {
 }
 
 type ExportRule struct {
-	Table       string `json:"table"`
-	cachedTable *bigquery.Table
-	Fields      []string `json:"fields"`
+	Table  string   `json:"table"`
+	Fields []string `json:"fields"`
+	cache  *exportCache
 }
 
 func New(ctx context.Context, config *ExportConfig) (*Exporter, error) {
@@ -69,8 +69,6 @@ func (e *Exporter) Close() error {
 func (e *Exporter) ExportHandler(ctx context.Context, event event.Event) error {
 	var data firestoredata.DocumentEventData
 
-	slog.InfoContext(ctx, "event info", slog.String("event_type", event.Type()))
-
 	// If you omit `DiscardUnknown`, protojson.Unmarshal returns an error
 	// when encountering a new or unknown field.
 	options := proto.UnmarshalOptions{
@@ -91,13 +89,19 @@ func (e *Exporter) ExportHandler(ctx context.Context, event event.Event) error {
 }
 
 func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.DocumentEventData) error {
+	eventType := DetectEventType(data)
+	slog.InfoContext(ctx, "event info", slog.String("event_type", string(eventType)))
+	if eventType == EventTypeDelete {
+		slog.WarnContext(ctx, "delete event is not supported yet")
+		return nil
+	}
+
 	name, err := ParseDocumentName(data.GetValue().GetName())
 	if err != nil {
 		return err
 	}
 
 	kind := name.CollectionName
-	// docID := name.DocumentID
 
 	if e.config.Rules == nil {
 		slog.WarnContext(ctx, "no rules found")
@@ -126,21 +130,15 @@ func (e *Exporter) exportToBigQuery(ctx context.Context, data *firestoredata.Doc
 	}
 
 	// BigQuery へ挿入
-	table := rule.cachedTable
-	if table == nil {
-		tableName, err := ParseTableName(rule.Table)
+	if rule.cache == nil {
+		rule.cache, err = e.newExportCache(rule.Table)
 		if err != nil {
-			return fmt.Errorf("failed to parse table name: %w", err)
+			return fmt.Errorf("failed to create export cache: %w", err)
 		}
-		if tableName.ProjectID == "" {
-			table = e.bigqueryClient.Dataset(tableName.DatasetID).Table(tableName.TableName)
-		} else {
-			table = e.bigqueryClient.DatasetInProject(tableName.ProjectID, tableName.DatasetID).Table(tableName.TableName)
-		}
-		rule.cachedTable = table
 	}
+
 	// if err := e.InsertRow(ctx, table, row); err != nil {
-	if err := e.UpsertRowWithStorageAPI(ctx, table, row); err != nil {
+	if err := e.UpsertRowWithStorageAPI(ctx, row, rule.cache); err != nil {
 		return fmt.Errorf("failed to upsert row: %w", err)
 	}
 	//}

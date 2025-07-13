@@ -14,6 +14,24 @@ type DocumentName struct {
 	DocumentID     string
 }
 
+type EventType string
+
+const (
+	EventTypeCreate EventType = "create"
+	EventTypeUpdate EventType = "update"
+	EventTypeDelete EventType = "delete"
+)
+
+func DetectEventType(event *firestoredata.DocumentEventData) EventType {
+	if event.UpdateMask != nil {
+		return EventTypeUpdate
+	}
+	if event.OldValue != nil {
+		return EventTypeDelete
+	}
+	return EventTypeCreate
+}
+
 func ParseDocumentName(name string) (*DocumentName, error) {
 	// projects/{projectId}/databases/{databaseId}/documents/{collectionName}/{documentId}
 	// ただし、 documentName に / が含まれる場合は、ネストした collectionName のため、サポートしないものとする。
@@ -44,7 +62,10 @@ func ExtractDocumentFieldValue(value *firestoredata.Value) any {
 	case *firestoredata.Value_DoubleValue:
 		return v.DoubleValue
 	case *firestoredata.Value_TimestampValue:
-		return v.TimestampValue
+		if v.TimestampValue == nil {
+			return nil
+		}
+		return v.TimestampValue.AsTime()
 	case *firestoredata.Value_StringValue:
 		return v.StringValue
 	case *firestoredata.Value_BytesValue:

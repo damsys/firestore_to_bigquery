@@ -9,12 +9,9 @@ import (
 	"cloud.google.com/go/bigquery"
 	"cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"cloud.google.com/go/bigquery/storage/managedwriter"
-	"cloud.google.com/go/bigquery/storage/managedwriter/adapt"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // InsertRow は指定テーブルに1行を挿入する
@@ -27,47 +24,36 @@ func (e *Exporter) InsertRow(ctx context.Context, table *bigquery.Table, row map
 }
 
 // UpsertRowWithStorageAPI は指定テーブルに1行を Upsert する（BigQuery Storage API を使用）
-func (e *Exporter) UpsertRowWithStorageAPI(ctx context.Context, table *bigquery.Table, row map[string]any) error {
-	metadata, err := table.Metadata(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get table metadata: %w", err)
+func (e *Exporter) UpsertRowWithStorageAPI(ctx context.Context, row map[string]any, cache *exportCache) error {
+	// https://github.com/googleapis/google-cloud-go/blob/7a46b5428f239871993d66be2c7c667121f60a6f/bigquery/storage/managedwriter/integration_test.go#L397
+	if err := e.setupDynamicDescriptors(ctx, cache); err != nil {
+		return fmt.Errorf("failed to setup dynamic descriptors: %w", err)
 	}
-	schema, err := adapt.BQSchemaToStorageTableSchema(metadata.Schema)
-	if err != nil {
-		return fmt.Errorf("failed to convert schema: %w", err)
-	}
-	descriptor, err := adapt.StorageSchemaToProto2Descriptor(schema, "root")
-	if err != nil {
-		return fmt.Errorf("failed to convert schema: %w", err)
-	}
-	messageDescriptor, ok := descriptor.(protoreflect.MessageDescriptor)
-	if !ok {
-		return fmt.Errorf("failed to convert schema: %w", err)
-	}
-	descriptorProto, err := adapt.NormalizeDescriptor(messageDescriptor)
-	if err != nil {
-		return fmt.Errorf("failed to normalize descriptor: %w", err)
-	}
+
 	// ManagedWriter を作成
 	writer, err := e.managedWriterClient.NewManagedStream(
 		ctx,
+		managedwriter.WithDestinationTable(managedwriter.TableParentFromParts(
+			cache.table.ProjectID,
+			cache.table.DatasetID,
+			cache.table.TableID,
+		)),
+		managedwriter.WithSchemaDescriptor(cache.descriptorProto),
 		managedwriter.WithType(managedwriter.DefaultStream),
-		managedwriter.WithDestinationTable(managedwriter.TableParentFromParts(table.ProjectID, table.DatasetID, table.TableID)),
-		managedwriter.WithSchemaDescriptor(descriptorProto),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create managed writer: %w", err)
 	}
 	defer writer.Close()
 
-	// 時刻を
+	// 時刻は microseconds に変換
 	for k, v := range row {
 		switch vv := v.(type) {
 		case time.Time:
-			row[k] = timestamppb.New(vv)
+			row[k] = vv.UnixMicro()
 		case *time.Time:
 			if vv != nil {
-				row[k] = timestamppb.New(*vv)
+				row[k] = vv.UnixMicro()
 			}
 		}
 	}
@@ -75,7 +61,7 @@ func (e *Exporter) UpsertRowWithStorageAPI(ctx context.Context, table *bigquery.
 	if err != nil {
 		return fmt.Errorf("failed to marshal json message: %w", err)
 	}
-	message := dynamicpb.NewMessage(messageDescriptor)
+	message := dynamicpb.NewMessage(cache.messageDescriptor)
 	err = protojson.Unmarshal(raw, message)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal json message: %w", err)
